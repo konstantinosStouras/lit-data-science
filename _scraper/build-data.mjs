@@ -159,9 +159,9 @@ const SELECT = [
 // double-encoded "&lt;sup&gt;2&lt;/sup&gt;" survived as literal markup and
 // every other entity ("&apos;", "&nbsp;", "&EACUTE;") rendered raw.
 import { cleanText as stripJats, trimTrailingSeparators, titleText,
-  affilName, affilParts, affilList } from './_entities.mjs';
+  affilName, affilParts, affilList, junkAbstract } from './_entities.mjs';
 import { betterAbstract } from './abstracts-ci.mjs';
-export { stripJats, trimTrailingSeparators, titleText, affilName, affilParts, affilList };
+export { stripJats, trimTrailingSeparators, titleText, affilName, affilParts, affilList, junkAbstract };
 
 function yearOf(item) {
   const pick = (d) => d && d['date-parts'] && d['date-parts'][0] && d['date-parts'][0][0];
@@ -257,7 +257,13 @@ function mapWork(item, src) {
     if (af && af.name) affilParts(af.name).forEach((nm) => affSet.add(nm));
   }));
 
-  const abstract = stripJats(item.abstract || '').slice(0, MAX_ABSTRACT);
+  // junkAbstract (user report 2026-08): an editorial plain-language summary
+  // (INFORMS-style blurbs naming the paper's own authors) or a bare
+  // citation-line stub deposited as the abstract is never served as one —
+  // dropped, so the API backfill can fill the real text.
+  let abstract = stripJats(item.abstract || '').slice(0, MAX_ABSTRACT);
+  if (abstract && junkAbstract(abstract,
+    { title, authors: authorsArr.join(', '), journal: src.name })) abstract = '';
 
   // Editors/Areas: Management Science only (per the page's design).
   let editor = '', area = '';
@@ -1326,6 +1332,8 @@ async function applyAbstractCaches(allPapers) {
   for (const row of allPapers) {
     const rec = row._doi && map[row._doi];
     if (!rec || !rec.a) continue;
+    // A cached capture that is itself a summary/citation stub is never applied.
+    if (junkAbstract(rec.a, { title: row.Title, authors: row.Authors, journal: row.Journal })) continue;
     if (betterAbstract(row.Abstract, rec.a)) { row.Abstract = rec.a.slice(0, MAX_ABSTRACT); up++; }
   }
   if (up) console.log(`  abstracts: upgraded ${up} teaser/missing abstracts from the API cache`);
@@ -1556,6 +1564,8 @@ function mergeSupplement(bySource) {
     };
     if (src.seEditors) row['Senior Editor'] = s['Senior Editor'] || '';
     if (src.aeEditors) row['Associate Editor'] = s['Associate Editor'] || '';
+    if (row.Abstract && junkAbstract(row.Abstract,
+      { title: row.Title, authors: row.Authors, journal: row.Journal })) row.Abstract = '';
     bySource[src.key].push(row);
     added++;
   }
