@@ -301,3 +301,92 @@ export function affilList(s) {
   }
   return cur;
 }
+
+// Article-page furniture must never be served as an abstract (feedback ticket
+// LIT-260727-XRQ8). Two junk shapes reach the pipelines: (1) the pubsonline
+// page harvest can capture the navigation + "Cited by" block AFTER the real
+// abstract ("… Previous Back to Top Next Figures References Related
+// Information Cited by <citing-article list>"), and (2) Semantic Scholar
+// sometimes serves a scrape of the WHOLE article page — share bar, author
+// links, citation metadata — for items that have no abstract at all
+// ("Journal Article <title> Get access <authors> Search for other works by
+// this author on: Oxford Academic Google Scholar …", U. Chicago's "Previous
+// articleNext article … PDFPDF PLUS Add to favoritesDownload Citation…").
+// stripPageFurniture cuts everything from the first navigation signature on,
+// then rejects (→ '') a remainder that is page chrome rather than abstract
+// prose. Deliberately high-precision, like isNonArticle: the cut anchors on
+// the full "Figures References Related Information" section-label sequence —
+// never on "Back to Top" alone, which could occur inside a real sentence —
+// and the chrome test needs either one unambiguous marker (phrases that can
+// only come from a scraped page) or two weaker ones together. Weak markers
+// alone never reject, so an abstract that legitimately says e.g. "…request
+// permission…" survives. Pure + idempotent; callers keep their existing
+// ≥60-char floor for what counts as a real abstract.
+const FURNITURE_CUT_RE =
+  /(?:(?:Previous\s+)?Back to Top\s+)?(?:Next\s+)?Figures\s*References\s*Related\s*Information/i;
+const CHROME_STRONG_RE = [
+  /ShareShare on/i,
+  /Share on\s*Facebook/i,
+  /PDFPDF/,
+  /AboutSectionsView/i,
+  /Previous articleNext article/i,
+  /Download citation file/i,
+  /Search for other works by this author/i,
+  /Search for more papers by this author/i,
+  /Crossref reports no articles citing this article/i,
+  /No abstract is available for this article/i,
+  /PermissionsReprints/,
+  /View PDF Tools/i,
+  /This article corrects the following/i,
+];
+const CHROME_WEAK_RE = [
+  /Add to favorites/i,
+  /Track citations?\b/i,
+  /Download citations?\b/i,
+  /Published Online\s*:/i,
+  /Article Information\s*Metrics/i,
+  /Request permissions?\b/i,
+  /Export citation\b/i,
+  /First published\s*:/i,
+];
+export function stripPageFurniture(raw) {
+  let s = String(raw == null ? '' : raw);
+  const i = s.search(FURNITURE_CUT_RE);
+  if (i >= 0) s = s.slice(0, i).trim();
+  if (CHROME_STRONG_RE.some((re) => re.test(s))) return '';
+  if (CHROME_WEAK_RE.filter((re) => re.test(s)).length >= 2) return '';
+  return s;
+}
+
+// ── ScienceDirect "Highlights" are never served as the abstract ─────────────
+// Elsevier deposits many papers' author HIGHLIGHTS — the 3-5 short bullet
+// points ScienceDirect shows above the abstract — as (or fused into) the
+// Crossref abstract field (user report 2026-08: ~170 EJOR + ~120 Research
+// Policy rows read "• A new measure capturing fairness… • We provide…" in
+// place of the abstract; OpenAlex/S2 mirror the same deposit into the API
+// backfill's cache). Once JATS is flattened the section labels are mostly
+// gone, so the shape itself is the signal:
+//   • prose (≥250 chars) BEFORE the first bullet = the real abstract with the
+//     highlights appended — KEEP the prose, cut the bullets (the common EJOR
+//     deposit, ~60% of affected rows);
+//   • text STARTING with the bullet block (bare, "Highlights"-labelled, or
+//     led by the paper's own title) — the real abstract may be fused into the
+//     last bullet with NO separator, and there is no safe seam to cut at, so
+//     the whole text is dropped ('' → the row is "needy" again and the
+//     rolling backfills re-resolve the true abstract; same discipline as
+//     stripPageFurniture/junkAbstract: no abstract beats a wrong one).
+// High-precision guards: fewer than 2 bullets is never a highlights block (a
+// lone mid-prose '•' survives), and if any INNER inter-bullet segment runs
+// long (>250 chars) the text is prose that legitimately uses bullets and is
+// left untouched. Pure + idempotent, so every ingest re-applies safely.
+export function stripHighlights(raw) {
+  const text = String(raw == null ? '' : raw).trim();
+  if (!text) return '';
+  const parts = text.split('•');
+  if (parts.length < 3) return text;             // fewer than 2 bullets
+  const inner = parts.slice(1, -1).map(s => s.trim());
+  if (inner.some(s => s.length > 250)) return text;
+  const lead = parts[0].trim().replace(/\s*Highlights?\s*[:.]?\s*$/i, '').trim();
+  if (lead.length >= 250) return lead;           // abstract-then-highlights
+  return '';                                     // bullets-first: no safe seam
+}
